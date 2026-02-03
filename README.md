@@ -5,8 +5,6 @@ This reposistory will be the home for the senior design project. Involving the g
 None - uses only Python Standard Library
 
 # NASA Data Plotter Dependencies
-pvl
-pandas
 matplotlib
 numpy
 pds4_tools

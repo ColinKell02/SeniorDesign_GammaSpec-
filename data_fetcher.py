@@ -1,13 +1,11 @@
 """
-NASA Data Fetcher - Standalone CLI Tool
-Supports: Lunar Prospector (LP), DAWN at Ceres, and Mars Curiosity (MSL).
-Formatting: Black
+NASA Data Fetcher - Webscraper for extracting data files for
+Lunar Prospector GRS, Mars Curiosity DAN, and Ceres DAWN.
 """
 
 import os
 import re
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime, date
 from pathlib import Path
@@ -67,8 +65,8 @@ class MissionSpec:
     label: str
     base_url: str
     list_records: Callable[[str], List[Record]]
-    date_range: str  # Added for display
-    folder: str  # Added for directory structure
+    date_range: str
+    target_folder: str
 
 
 # --- MISSION: DAWN ---
@@ -85,8 +83,7 @@ def _list_dawn_records(base_url: str) -> List[Record]:
     }
     recs = []
     for x in xmls:
-        bn = os.path.basename(x)
-        stem = os.path.splitext(bn)[0]
+        stem = os.path.splitext(os.path.basename(x))[0]
         if stem in tabs:
             m = _DAWN_DATE_RE.search(stem)
             if m:
@@ -96,31 +93,35 @@ def _list_dawn_records(base_url: str) -> List[Record]:
     return recs
 
 
-# --- MISSION: Lunar Prospector ---
+# --- MISSION: Lunar Prospector (PDS4 XML/DAT Version) ---
 _LP_RE = re.compile(r"(\d{4})_(\d{3})_grs", re.IGNORECASE)
 
 
 def _list_lp_records(base_url: str) -> List[Record]:
+    """Lists PDS4 records (.xml + .dat) for LP, ignoring .lbl files."""
     hrefs = _list_directory(base_url)
-    dats = [h for h in hrefs if h.lower().endswith(".dat")]
-    lbls = {
-        os.path.basename(h)[:12].lower(): h
+    xmls = [h for h in hrefs if h.lower().endswith(".xml")]
+    # Create a mapping of stems to .dat files
+    dats = {
+        os.path.splitext(os.path.basename(h))[0].lower(): h
         for h in hrefs
-        if h.lower().endswith(".lbl")
+        if h.lower().endswith(".dat")
     }
+
     recs = []
-    for d in dats:
-        bn = os.path.basename(d)
-        m = _LP_RE.search(bn)
-        if m:
-            stem = bn[:12].lower()
-            if stem in lbls:
+    for x in xmls:
+        bn = os.path.basename(x)
+        stem = os.path.splitext(bn)[0].lower()
+        # Only include if there is a matching .dat file; .lbl files are skipped
+        if stem in dats:
+            m = _LP_RE.search(bn)
+            if m:
                 dt = datetime.strptime(f"{m.group(1)}-{m.group(2)}", "%Y-%j").date()
-                recs.append(Record(stem, dt, dt, [d, lbls[stem]]))
+                recs.append(Record(stem, dt, dt, [x, dats[stem]]))
     return recs
 
 
-# --- MISSION: Mars Curiosity ---
+# --- MISSION: Mars Curiosity (MSL) ---
 _MSL_RE = re.compile(r"sol(\d{5})", re.IGNORECASE)
 
 
@@ -129,17 +130,16 @@ def _list_msl_records(base_url: str) -> List[Record]:
     dat_files = [
         h for h in hrefs if h.lower().endswith(".dat") or h.lower().endswith(".tab")
     ]
+    # Assuming MSL also uses XML labels for this specific fetcher logic
     lbl_files = {
         os.path.splitext(os.path.basename(h))[0]: h
         for h in hrefs
-        if h.lower().endswith(".lbl")
+        if h.lower().endswith(".xml")
     }
     recs = []
     for f in dat_files:
-        bn = os.path.basename(f)
-        stem = os.path.splitext(bn)[0]
+        stem = os.path.splitext(os.path.basename(f))[0]
         if stem in lbl_files:
-            m = _MSL_RE.search(bn)
             mock_date = date(2012, 8, 6)
             recs.append(Record(stem, mock_date, mock_date, [f, lbl_files[stem]]))
     return recs
@@ -184,19 +184,22 @@ def run_fetcher():
         return
 
     spec = MISSIONS[choice]
-    print(f"\nConfiguration for {spec.label}:")
-    print(f"Available Range: {spec.date_range}")  # Display range
-    start_str = input("Start Date (YYYY-MM-DD, enter to skip): ").strip()
-    end_str = input("End Date (YYYY-MM-DD, enter to skip): ").strip()
+    print(f"\nConfiguration for {spec.label}: {spec.date_range}")
+    start_str = input("Start Date (YYYY-MM-DD, or Enter for all): ").strip()
+    end_str = input("End Date (YYYY-MM-DD, or Enter for all): ").strip()
 
-    start_dt = date.fromisoformat(start_str) if start_str else None
-    end_dt = date.fromisoformat(end_str) if end_str else None
+    try:
+        start_dt = date.fromisoformat(start_str) if start_str else None
+        end_dt = date.fromisoformat(end_str) if end_str else None
+    except ValueError:
+        print("Invalid date format. Please use YYYY-MM-DD.")
+        return
 
-    # Organized folder structure: [Mission]/data/
-    dest_dir = Path(spec.folder) / "data"
+    # Create hierarchical directory structure: Mission/data/
+    dest_dir = Path(spec.target_folder) / "data"
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Listing records from: {spec.base_url}")
+    print(f"\nSearching NASA PDS for records...")
     try:
         records = spec.list_records(spec.base_url)
     except Exception as e:
@@ -210,7 +213,7 @@ def run_fetcher():
         and (not end_dt or r.date_start <= end_dt)
     ]
 
-    print(f"Found {len(filtered)} records matching criteria.")
+    print(f"Found {len(filtered)} records matching criteria. Starting download...\n")
 
     for i, rec in enumerate(filtered):
         for remote_path in rec.files:
@@ -218,6 +221,7 @@ def run_fetcher():
             local_filename = remote_path.split("/")[-1]
             dest = dest_dir / local_filename
 
+            # Avoid re-downloading existing files
             if dest.exists():
                 print(f"[{i+1}/{len(filtered)}] Skipping existing: {local_filename}")
                 continue
@@ -225,10 +229,13 @@ def run_fetcher():
             print(f"[{i+1}/{len(filtered)}] Downloading: {local_filename}")
             try:
                 _write_stream(url, dest)
+            except KeyboardInterrupt:
+                print("\nDownload interrupted by user.")
+                sys.exit(0)
             except Exception as e:
                 print(f"  Error downloading {local_filename}: {e}")
 
-    print(f"\nFetch Complete. Files saved to: {dest_dir.absolute()}")
+    print(f"\nDone. Files saved to: {dest_dir.absolute()}")
 
 
 if __name__ == "__main__":
