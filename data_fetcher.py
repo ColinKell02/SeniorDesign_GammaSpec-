@@ -1,5 +1,5 @@
 """
-NASA Data Fetcher - Standalone CLI Tool (Fixed Path Handling)
+NASA Data Fetcher - Standalone CLI Tool
 Supports: Lunar Prospector (LP), DAWN at Ceres, and Mars Curiosity (MSL).
 Formatting: Black
 """
@@ -40,7 +40,6 @@ def _list_directory(base_url: str) -> List[str]:
     html = _http_get_text(base_url)
     p = _LinkParser()
     p.feed(html)
-    # Filter out navigation links
     return [h for h in p.hrefs if h and h not in ("../", "./", "/")]
 
 
@@ -68,16 +67,17 @@ class MissionSpec:
     label: str
     base_url: str
     list_records: Callable[[str], List[Record]]
+    date_range: str  # Added for display
+    folder: str  # Added for directory structure
 
 
-# --- MISSION: DAWN (XML+TAB) ---
+# --- MISSION: DAWN ---
 _DAWN_DATE_RE = re.compile(r"(\d{6})-(\d{6})")
 
 
 def _list_dawn_records(base_url: str) -> List[Record]:
     hrefs = _list_directory(base_url)
     xmls = [h for h in hrefs if h.lower().endswith(".xml")]
-    # Map by filename without extension
     tabs = {
         os.path.splitext(os.path.basename(h))[0]: h
         for h in hrefs
@@ -96,14 +96,13 @@ def _list_dawn_records(base_url: str) -> List[Record]:
     return recs
 
 
-# --- MISSION: Lunar Prospector (LP) ---
+# --- MISSION: Lunar Prospector ---
 _LP_RE = re.compile(r"(\d{4})_(\d{3})_grs", re.IGNORECASE)
 
 
 def _list_lp_records(base_url: str) -> List[Record]:
     hrefs = _list_directory(base_url)
     dats = [h for h in hrefs if h.lower().endswith(".dat")]
-    # LP files use the first 12 chars (e.g., 1998_016_grs) as the unique stem
     lbls = {
         os.path.basename(h)[:12].lower(): h
         for h in hrefs
@@ -121,7 +120,7 @@ def _list_lp_records(base_url: str) -> List[Record]:
     return recs
 
 
-# --- MISSION: Mars Curiosity (MSL DAN) ---
+# --- MISSION: Mars Curiosity ---
 _MSL_RE = re.compile(r"sol(\d{5})", re.IGNORECASE)
 
 
@@ -141,7 +140,6 @@ def _list_msl_records(base_url: str) -> List[Record]:
         stem = os.path.splitext(bn)[0]
         if stem in lbl_files:
             m = _MSL_RE.search(bn)
-            # Default to landing date if Sol not found, used for filtering
             mock_date = date(2012, 8, 6)
             recs.append(Record(stem, mock_date, mock_date, [f, lbl_files[stem]]))
     return recs
@@ -153,18 +151,24 @@ MISSIONS = {
         "Lunar Prospector GRS",
         "https://pds-geosciences.wustl.edu/lunar/lp-l-grs-3-rdr-v1/lp_2xxx/grs/",
         _list_lp_records,
+        "1998-01-16 to 1999-07-28",
+        "Moon",
     ),
     "2": MissionSpec(
         "DAWN",
         "DAWN GRAND CERES",
         "https://sbnarchive.psi.edu/pds4/dawn/grand/dawn-grand-ceres_1.0/data_calibrated/",
         _list_dawn_records,
+        "2015-03-12 to 2018-11-01",
+        "Ceres",
     ),
     "3": MissionSpec(
         "MSL",
         "Mars Curiosity (DAN/GRS)",
         "https://pds-geosciences.wustl.edu/msl/msl-m-dan-2-edr-v1/data/",
         _list_msl_records,
+        "2012-08-06 to Present",
+        "Mars",
     ),
 }
 
@@ -181,14 +185,16 @@ def run_fetcher():
 
     spec = MISSIONS[choice]
     print(f"\nConfiguration for {spec.label}:")
+    print(f"Available Range: {spec.date_range}")  # Display range
     start_str = input("Start Date (YYYY-MM-DD, enter to skip): ").strip()
     end_str = input("End Date (YYYY-MM-DD, enter to skip): ").strip()
 
     start_dt = date.fromisoformat(start_str) if start_str else None
     end_dt = date.fromisoformat(end_str) if end_str else None
 
-    dest_dir = Path(f"data_{spec.code.lower()}")
-    dest_dir.mkdir(exist_ok=True)
+    # Organized folder structure: [Mission]/data/
+    dest_dir = Path(spec.folder) / "data"
+    dest_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Listing records from: {spec.base_url}")
     try:
@@ -208,9 +214,7 @@ def run_fetcher():
 
     for i, rec in enumerate(filtered):
         for remote_path in rec.files:
-            # Join with base URL for the download link
             url = urljoin(spec.base_url, remote_path)
-            # Use only the filename (last part of path) for local storage
             local_filename = remote_path.split("/")[-1]
             dest = dest_dir / local_filename
 
@@ -228,5 +232,4 @@ def run_fetcher():
 
 
 if __name__ == "__main__":
-    run_fetcher()1
-    
+    run_fetcher()
