@@ -8,3 +8,5 @@ None - uses only Python Standard Library
 matplotlib
 numpy
 pds4_tools
+pandas
+plotly
