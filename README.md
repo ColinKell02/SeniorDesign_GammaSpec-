@@ -10,3 +10,7 @@ numpy,
 pds4_tools,
 pandas,
 plotly
+
+#pytest Dependencies
+pytest, 
+pytest-mock
