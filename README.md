@@ -14,3 +14,11 @@ plotly
 #pytest Dependencies
 pytest, 
 pytest-mock
+
+# Lunar Navigator Dependencies
+pandas
+numpy
+plotl
+dash
+pds4_tools
+PIL
