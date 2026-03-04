@@ -33,16 +33,19 @@ def build_library():
                 parsed = info["parser"](xml_file)
                 lats = parsed.get("lat")
                 lons = parsed.get("lon")
+                # NEW: Extract altitude from your parser
+                alts = parsed.get("altitude") 
 
-                # Handle cases where geometry might be missing or mismatched
-                if lats is None or lons is None or len(lats) == 0 or len(lats) != len(lons):
-                    print(f"  [!] Missing or mismatched coordinates in {xml_file.name}")
+                # Handle cases where geometry or altitude might be missing or mismatched lengths
+                if (lats is None or lons is None or alts is None or 
+                    len(lats) == 0 or len(lats) != len(lons) or len(lats) != len(alts)):
+                    print(f"  [!] Missing or mismatched coordinates/altitudes in {xml_file.name}")
                     continue
 
-                # Iterate through all coordinates in the file and add them individually
-                for idx, (lat, lon) in enumerate(zip(lats, lons)):
+                # Iterate through all coordinates and altitudes in the file and add them individually
+                for idx, (lat, lon, alt) in enumerate(zip(lats, lons, alts)):
                     # Skip NaN (Not a Number) values if there's corrupted data
-                    if np.isnan(lat) or np.isnan(lon):
+                    if np.isnan(lat) or np.isnan(lon) or np.isnan(alt):
                         continue
                         
                     library_data.append({
@@ -50,7 +53,8 @@ def build_library():
                         "filename": xml_file.name,
                         "record_index": idx,  # Helps Dash know WHICH spectrum to fetch
                         "lat": round(lat, 4),
-                        "lon": round(lon, 4)
+                        "lon": round(lon, 4),
+                        "altitude": round(alt, 2)  # ADDED ALTITUDE TO EXPORT
                     })
 
             except Exception as e:

@@ -74,7 +74,7 @@ def parse_lp(xml_file):
         "spectrum": data["GROUP_0, Accepted Spectrum"],
         "lat": data["Subspacecraft_Latitude"],
         "lon": data["Subspacecraft_Longitude"],
-        "alt": data["Spacecraft_Altitude"],
+        "altitude": data["Spacecraft_Altitude"],
     }
 
 
