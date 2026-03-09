@@ -7,29 +7,43 @@ Mars Curiosity DAN data
 
 import re
 import sys
+import csv
 from dataclasses import dataclass
 from datetime import datetime, date
 from pathlib import Path
-from typing import Callable, List
+from typing import Callable, List, Set
 from urllib.parse import urljoin
 from urllib.request import urlopen, Request
 from html.parser import HTMLParser
 
 # CONFIGURATION SETTINGS
-# Edit these variables to change what the script downloads.
 
 # 1: Lunar Prospector GRS ("1")
 # 2: Mars Curiosity DAN ("2")
 # 3: Ceres DAWN GRaND ("3")
 MISSION_ID = "1" 
 
-# Date range format: "YYYY-MM-DD"
-# Set to None to use the mission's full available duration.
-START_DATE = None  # Example: "1998-01-01"
-END_DATE   = None  # Example: "1999-12-31"
+# Filter data by either date, cooridnates, or no filter:
+# Filter mode: Choose "date", "spatial", or "none"
+FILTER_MODE = "spatial"
 
-# The name of the local folder where data will be stored, such as Moon, Ceres, Mars, API
+# Date Constraints (Used if FILTER_MODE = "date")
+# Date range format: "YYYY-MM-DD". Set to None to use mission defaults.
+START_DATE = None  
+END_DATE   = None  
+
+# Spatial Constraints (Used if FILTER_MODE = "spatial")
+# Currently only supported for Lunar Prospector (Mission 1)
+LAT_MIN = -30.0
+LAT_MAX = 0.0
+LON_MIN = 0.0
+LON_MAX = 43.0
+
+# The name of the local folder where data will be stored
+# Select either Ceres, Moon, or Mars
 BASE_OUTPUT_FOLDER = "Moon"
+
+# END CONFIGURATION
 
 class _LinkParser(HTMLParser):
     def __init__(self):
@@ -141,17 +155,31 @@ MISSIONS = {
 def _parse_date(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
 
+def _get_files_in_bounds(csv_path: Path, lat_min: float, lat_max: float, lon_min: float, lon_max: float) -> Set[str]:
+    """Reads the CSV and returns a set of lowercase filenames within bounds."""
+    valid_files = set()
+    # using utf-8-sig handles the invisible BOM character if the CSV was saved from Excel
+    with open(csv_path, mode='r', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                lat = float(row['lat'])
+                lon = float(row['lon'])
+                if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+                    # Strip whitespace and force lowercase for bulletproof matching
+                    clean_name = row['filename'].strip().lower()
+                    valid_files.add(clean_name)
+            except (ValueError, KeyError):
+                # Skip rows with missing or invalid float data
+                continue
+    return valid_files
+
 def main():
     if MISSION_ID not in MISSIONS:
         print(f"Error: MISSION_ID '{MISSION_ID}' is invalid. Use '1', '2', or '3'.")
         return
 
     spec = MISSIONS[MISSION_ID]
-    
-    # Resolve dates
-    start_dt = _parse_date(START_DATE) if START_DATE else _parse_date(spec.default_start)
-    end_dt = _parse_date(END_DATE) if END_DATE else _parse_date(spec.default_end)
-
     print(f"--- Starting Download for {spec.name} ---")
     dest_dir = Path(BASE_OUTPUT_FOLDER) / spec.target_folder / "data"
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -162,12 +190,48 @@ def main():
         print(f"Error connecting to NASA server: {e}")
         return
 
-    filtered = [
-        r for r in records
-        if (r.date_end >= start_dt) and (r.date_start <= end_dt)
-    ]
+    filtered = []
 
-    print(f"Found {len(filtered)} records matching date criteria ({start_dt} to {end_dt}).")
+    if FILTER_MODE == "spatial":
+        if MISSION_ID != "1":
+            print("Error: Spatial filtering is currently only supported for Lunar Prospector (Mission 1).")
+            return
+            
+        print(f"Filtering by spatial bounds: Lat [{LAT_MIN}, {LAT_MAX}], Lon [{LON_MIN}, {LON_MAX}]")
+        csv_path = Path("spatial_library_full.csv")
+        
+        if not csv_path.exists():
+            print(f"Error: Could not find '{csv_path.name}' in the current directory.")
+            return
+            
+        valid_filenames = _get_files_in_bounds(csv_path, LAT_MIN, LAT_MAX, LON_MIN, LON_MAX)
+        print(f"Debug: Found {len(valid_filenames)} unique files in the CSV that match the coordinates.")
+        
+        # Keep records where any file in the record matches a valid filename from the CSV
+        # We split by "/" to ensure we are only comparing the filename, not a URL path, and force lowercase.
+        filtered = [
+            r for r in records 
+            if any(f.split("/")[-1].strip().lower() in valid_filenames for f in r.files)
+        ]
+        print(f"Found {len(filtered)} NASA server records matching spatial criteria.")
+
+    elif FILTER_MODE == "date":
+        start_dt = _parse_date(START_DATE) if START_DATE else _parse_date(spec.default_start)
+        end_dt = _parse_date(END_DATE) if END_DATE else _parse_date(spec.default_end)
+        
+        filtered = [
+            r for r in records
+            if (r.date_end >= start_dt) and (r.date_start <= end_dt)
+        ]
+        print(f"Found {len(filtered)} records matching date criteria ({start_dt} to {end_dt}).")
+
+    elif FILTER_MODE == "none":
+        filtered = records
+        print(f"Found {len(filtered)} total records. Downloading all (no filtering).")
+        
+    else:
+        print(f"Error: Invalid FILTER_MODE '{FILTER_MODE}'. Choose 'date', 'spatial', or 'none'.")
+        return
 
     for i, rec in enumerate(filtered):
         for remote_path in rec.files:

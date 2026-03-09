@@ -1,22 +1,20 @@
 """
-NASA Data Fetcher - Downloads data from the PDS4 archives for various missions including:
-Lunar Prospector GRS data
-DAWN at Ceres data
-Mars Curiosity DAN data
-This version contains a simple CLI for user accessibility.
+NASA Data Fetcher (Interactive Version) - Downloads data from the PDS4 archives for:
+1: Lunar Prospector GRS data
+2: Mars Curiosity DAN data
+3: Ceres DAWN GRaND data
 """
 
-import os
 import re
 import sys
+import csv
 from dataclasses import dataclass
 from datetime import datetime, date
 from pathlib import Path
-from typing import Callable, List
+from typing import Callable, List, Set
 from urllib.parse import urljoin
 from urllib.request import urlopen, Request
 from html.parser import HTMLParser
-
 
 class _LinkParser(HTMLParser):
     def __init__(self):
@@ -30,19 +28,16 @@ class _LinkParser(HTMLParser):
             if k.lower() == "href" and v:
                 self.hrefs.append(v)
 
-
 def _http_get_text(url: str, timeout: float = 30.0) -> str:
     req = Request(url, headers={"User-Agent": "nasagamma-fetcher/0.1"})
     with urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", errors="replace")
-
 
 def _list_directory(base_url: str) -> List[str]:
     html = _http_get_text(base_url)
     p = _LinkParser()
     p.feed(html)
     return [h for h in p.hrefs if not h.startswith("?")]
-
 
 def _write_stream(url: str, dest: Path, chunk_size: int = 8192):
     req = Request(url, headers={"User-Agent": "nasagamma-fetcher/0.1"})
@@ -53,13 +48,11 @@ def _write_stream(url: str, dest: Path, chunk_size: int = 8192):
                 break
             f.write(chunk)
 
-
 @dataclass
 class Record:
     date_start: date
     date_end: date
     files: List[str]
-
 
 @dataclass
 class DataSpec:
@@ -70,24 +63,20 @@ class DataSpec:
     default_start: str = None
     default_end: str = None
 
-
 def _lp_records(base_url: str) -> List[Record]:
     hrefs = _list_directory(base_url)
     xmls = [h for h in hrefs if h.lower().endswith(".xml")]
     dats = [h for h in hrefs if h.lower().endswith(".dat")]
-
     records = []
     for xml in xmls:
         base_name = xml[:-4]
         match_dat = f"{base_name}.dat"
         match_tab = f"{base_name}.tab"
-
         files = [xml]
         if match_dat in dats:
             files.append(match_dat)
         elif match_tab in hrefs:
             files.append(match_tab)
-
         match = re.search(r"(\d{4})(\d{3})", base_name)
         if match:
             year, doy = int(match.group(1)), int(match.group(2))
@@ -97,22 +86,15 @@ def _lp_records(base_url: str) -> List[Record]:
             records.append(Record(date_start=date(1998, 1, 1), date_end=date(1999, 12, 31), files=files))
     return records
 
-
 def _dawn_records(base_url: str) -> List[Record]:
     hrefs = _list_directory(base_url)
     targets = [h for h in hrefs if h.lower().endswith((".xml", ".lbl", ".dat", ".tab"))]
-    if not targets:
-        return []
-    return [Record(date_start=date(2015, 1, 1), date_end=date(2018, 12, 31), files=targets)]
-
+    return [Record(date_start=date(2015, 1, 1), date_end=date(2018, 12, 31), files=targets)] if targets else []
 
 def _msl_records(base_url: str) -> List[Record]:
     hrefs = _list_directory(base_url)
     targets = [h for h in hrefs if h.lower().endswith((".xml", ".lbl", ".dat", ".tab"))]
-    if not targets:
-        return []
-    return [Record(date_start=date(2012, 8, 6), date_end=date(2025, 12, 31), files=targets)]
-
+    return [Record(date_start=date(2012, 8, 6), date_end=date(2025, 12, 31), files=targets)] if targets else []
 
 MISSIONS = {
     "1": DataSpec(
@@ -141,32 +123,137 @@ MISSIONS = {
     ),
 }
 
-
 def _parse_date(s: str) -> date:
-    return datetime.strptime(s, "%Y-%m-%d").date()
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        print(f"Warning: '{s}' is not a valid YYYY-MM-DD date. Falling back to default.")
+        return None
 
+def _get_files_in_bounds(csv_path: Path, lat_min: float, lat_max: float, lon_min: float, lon_max: float) -> Set[str]:
+    """Reads the CSV and returns a set of lowercase filenames within bounds."""
+    valid_files = set()
+    with open(csv_path, mode='r', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                lat = float(row['lat'])
+                lon = float(row['lon'])
+                if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+                    clean_name = row['filename'].strip().lower()
+                    valid_files.add(clean_name)
+            except (ValueError, KeyError):
+                continue
+    return valid_files
 
-def download_mission(spec: DataSpec, start_dt: date = None, end_dt: date = None):
-    print(f"\n--- Downloading {spec.name} Data ---")
-    dest_dir = Path(spec.target_folder) / "data"
+def get_float_input(prompt: str) -> float:
+    """Helper to ensure the user enters a valid number."""
+    while True:
+        user_input = input(prompt).strip()
+        try:
+            return float(user_input)
+        except ValueError:
+            print("  -> Invalid input. Please enter a valid decimal number (e.g., -30.0).")
+
+def main():
+    print("="*40)
+    print(" NASA PDS4 Data Fetcher ")
+    print("="*40)
+
+    # 1. Ask for Mission
+    print("\nAvailable Missions:")
+    print("  1: Lunar Prospector GRS")
+    print("  2: Mars Curiosity DAN")
+    print("  3: Ceres DAWN GRaND")
+    
+    mission_id = input("\nEnter the Mission ID (1, 2, or 3): ").strip()
+    while mission_id not in MISSIONS:
+        mission_id = input("Invalid choice. Please enter 1, 2, or 3: ").strip()
+        
+    spec = MISSIONS[mission_id]
+
+    # 2. Ask for Filter Type
+    print("\nHow would you like to filter the data?")
+    if mission_id == "1":
+        print("  1: Spatial (Coordinates)")
+    print("  2: Date Range")
+    print("  3: No Filter (Download Everything)")
+    
+    valid_filters = ["1", "2", "3"] if mission_id == "1" else ["2", "3"]
+    filter_choice = input(f"Enter your choice ({'/'.join(valid_filters)}): ").strip()
+    
+    while filter_choice not in valid_filters:
+        filter_choice = input(f"Invalid choice. Please enter {' or '.join(valid_filters)}: ").strip()
+
+    # 3. Collect Filter Inputs
+    lat_min = lat_max = lon_min = lon_max = None
+    start_date_str = end_date_str = None
+
+    if filter_choice == "1":
+        print("\n--- Enter Spatial Bounds ---")
+        lat_min = get_float_input("Minimum Latitude: ")
+        lat_max = get_float_input("Maximum Latitude: ")
+        lon_min = get_float_input("Minimum Longitude: ")
+        lon_max = get_float_input("Maximum Longitude: ")
+    elif filter_choice == "2":
+        print("\n--- Enter Date Range (YYYY-MM-DD) ---")
+        print("Press Enter without typing anything to use the mission's default date.")
+        start_date_str = input(f"Start Date [Default: {spec.default_start}]: ").strip() or spec.default_start
+        end_date_str = input(f"End Date   [Default: {spec.default_end}]: ").strip() or spec.default_end
+
+    # Ask for an output folder
+    outdir = input("\nEnter the base folder name to save data [Default: NASA_Data]: ").strip() or "NASA_Data"
+
+    # Start the fetching process
+    print(f"\n--- Connecting to NASA Servers for {spec.name} ---")
+    dest_dir = Path(outdir) / spec.target_folder / "data"
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nSearching NASA PDS for records...")
     try:
         records = spec.list_records(spec.base_url)
     except Exception as e:
         print(f"Error connecting to NASA server: {e}")
         return
 
-    filtered = [
-        r
-        for r in records
-        if (not start_dt or r.date_end >= start_dt)
-        and (not end_dt or r.date_start <= end_dt)
-    ]
+    # Apply the filters
+    filtered = []
+    if filter_choice == "1":
+        print(f"Filtering by spatial bounds: Lat [{lat_min}, {lat_max}], Lon [{lon_min}, {lon_max}]")
+        csv_path = Path("spatial_library_full.csv")
+        
+        if not csv_path.exists():
+            print(f"Error: Could not find '{csv_path.name}' in the current directory.")
+            return
+            
+        valid_filenames = _get_files_in_bounds(csv_path, lat_min, lat_max, lon_min, lon_max)
+        print(f"Debug: Found {len(valid_filenames)} unique files in the CSV matching coordinates.")
+        
+        filtered = [
+            r for r in records 
+            if any(f.split("/")[-1].strip().lower() in valid_filenames for f in r.files)
+        ]
+        print(f"Found {len(filtered)} NASA server records matching spatial criteria.")
 
-    print(f"Found {len(filtered)} records matching criteria. Starting download...\n")
+    elif filter_choice == "2":
+        start_dt = _parse_date(start_date_str) or _parse_date(spec.default_start)
+        end_dt = _parse_date(end_date_str) or _parse_date(spec.default_end)
+        
+        filtered = [
+            r for r in records
+            if (r.date_end >= start_dt) and (r.date_start <= end_dt)
+        ]
+        print(f"Found {len(filtered)} records matching date criteria ({start_dt} to {end_dt}).")
 
+    else:
+        filtered = records
+        print(f"Found {len(filtered)} total records. Downloading all (no filtering).")
+
+    if not filtered:
+        print("No files matched your criteria. Exiting.")
+        return
+
+    # Download Loop
+    print("\nStarting downloads...")
     for i, rec in enumerate(filtered):
         for remote_path in rec.files:
             url = urljoin(spec.base_url, remote_path)
@@ -174,7 +261,7 @@ def download_mission(spec: DataSpec, start_dt: date = None, end_dt: date = None)
             dest = dest_dir / local_filename
 
             if dest.exists():
-                print(f"[{i+1}/{len(filtered)}] Skipping existing: {local_filename}")
+                print(f"[{i+1}/{len(filtered)}] Skipping (already exists): {local_filename}")
                 continue
 
             print(f"[{i+1}/{len(filtered)}] Downloading: {local_filename}")
@@ -186,27 +273,7 @@ def download_mission(spec: DataSpec, start_dt: date = None, end_dt: date = None)
             except Exception as e:
                 print(f"Error downloading {local_filename}: {e}")
 
-
-def main():
-    print("Available Missions:")
-    for k, v in MISSIONS.items():
-        print(f"  {k}: {v.name}")
-
-    choice = input("\nEnter mission number: ").strip()
-    if choice not in MISSIONS:
-        print("Invalid choice.")
-        return
-
-    spec = MISSIONS[choice]
-
-    start_str = input(f"Enter start date (YYYY-MM-DD) or press Enter for all [{spec.default_start}]: ").strip()
-    end_str = input(f"Enter end date (YYYY-MM-DD) or press Enter for all [{spec.default_end}]: ").strip()
-
-    start_dt = _parse_date(start_str) if start_str else _parse_date(spec.default_start)
-    end_dt = _parse_date(end_str) if end_str else _parse_date(spec.default_end)
-
-    download_mission(spec, start_dt, end_dt)
-
+    print("\nFinished!")
 
 if __name__ == "__main__":
     main()

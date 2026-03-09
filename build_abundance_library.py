@@ -1,3 +1,8 @@
+"""
+One time use script for creating the lunar Gelemental abundace library.
+Requires all elemental abundace derived data files for the 100km dataset.
+"""
+
 import os
 import sys
 from pathlib import Path

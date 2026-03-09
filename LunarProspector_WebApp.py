@@ -441,7 +441,7 @@ def update_spectrum_and_highlight(trigger_val, min_lat, max_lat, min_lon, max_lo
 
     warning_text, warning_style = "", hide_warning
     if missing_files_count > 0:
-        warning_text = f"⚠️ {missing_files_count} required data file(s) for this region were not found in {DATA_DIR} and were excluded from the average."
+        warning_text = f"{missing_files_count} required data file(s) for this region were not found in {DATA_DIR} and were excluded from the average."
         warning_style = {'display': 'block', 'backgroundColor': '#856404', 'color': '#ffeeba', 'padding': '10px'}
 
     if successful_reads == 0:
