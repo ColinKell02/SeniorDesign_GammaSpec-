@@ -20,6 +20,7 @@ Changes from the original:
 """
 
 import io
+import sys
 import base64
 import struct
 from datetime import datetime, timezone
@@ -724,6 +725,11 @@ def run():
     print("MARS CURIOSITY DAN INTERACTIVE PATH VIEWER")
     print("=" * 60)
 
+    # When launched from the MAIN.py web app, stdin is closed (DEVNULL) and
+    # the --non-interactive flag is passed.  In that mode we skip all input()
+    # calls and use safe defaults: load every file, full date range.
+    non_interactive = "--non-interactive" in sys.argv
+
     mars_dir = Path("NASA_Data/Mars") / "data"
     if not mars_dir.exists():
         print(f"ERROR: Data directory not found: {mars_dir}")
@@ -738,35 +744,46 @@ def run():
     for i, f in enumerate(dat_files):
         print(f"  {i + 1}: {f.name}")
 
-    print("\nSelect files to load:")
-    print("  all     – load everything")
-    print("  1,3,5   – comma-separated list")
-    print("  2-6     – inclusive range")
-    print("  4       – single file")
-
-    selection = input("\nYour selection: ").strip().lower()
-
-    if selection == "all":
+    if non_interactive:
+        # Auto-select all files when running headlessly from the launcher
+        print("\n[non-interactive] Loading all files.")
         selected = dat_files
     else:
-        indices = set()
-        for part in selection.split(","):
-            part = part.strip()
-            if "-" in part:
-                a, b = part.split("-", 1)
-                indices.update(range(int(a) - 1, int(b)))
-            else:
-                indices.add(int(part) - 1)
-        selected = [dat_files[i] for i in sorted(indices) if 0 <= i < len(dat_files)]
+        print("\nSelect files to load:")
+        print("  all     – load everything")
+        print("  1,3,5   – comma-separated list")
+        print("  2-6     – inclusive range")
+        print("  4       – single file")
 
-    if not selected:
-        print("No valid files selected.")
-        return
+        selection = input("\nYour selection: ").strip().lower()
+
+        if selection == "all":
+            selected = dat_files
+        else:
+            indices = set()
+            for part in selection.split(","):
+                part = part.strip()
+                if "-" in part:
+                    a, b = part.split("-", 1)
+                    indices.update(range(int(a) - 1, int(b)))
+                else:
+                    indices.add(int(part) - 1)
+            selected = [dat_files[i] for i in sorted(indices) if 0 <= i < len(dat_files)]
+
+        if not selected:
+            print("No valid files selected.")
+            return
 
     print(f"\nLoading {len(selected)} file(s)...")
     data = load_dan_files(selected)
 
-    data, date_start, date_end = apply_date_filter(data)
+    if non_interactive:
+        # Skip interactive date filtering — use the full dataset range
+        print("\n[non-interactive] Skipping date filter — using full date range.")
+        date_start = date_end = None
+    else:
+        data, date_start, date_end = apply_date_filter(data)
+
     print_path_endpoints(data)
 
     print("\nBuilding figure...")
