@@ -724,7 +724,7 @@ def run():
     print("MARS CURIOSITY DAN INTERACTIVE PATH VIEWER")
     print("=" * 60)
 
-    mars_dir = Path("Mars") / "data"
+    mars_dir = Path("NASA_Data/Mars") / "data"
     if not mars_dir.exists():
         print(f"ERROR: Data directory not found: {mars_dir}")
         return
