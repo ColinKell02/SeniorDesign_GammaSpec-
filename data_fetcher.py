@@ -432,33 +432,189 @@ def _lp_records(base_url: str) -> List[Record]:
     return records
 
 
-def _dawn_records(base_url: str) -> List[Record]:
+# ============================================================
+# CERES DAWN GRaND — RECURSIVE FILE LISTING
+# ============================================================
+# The PDS4 Ceres GRaND archive at
+#   https://sbnarchive.psi.edu/pds4/dawn/grand/dawn-grand-ceres_1.0/data_calibrated/
+# is organized by science phase / collection (not by year) and the layout
+# has changed over time.  Rather than baking in any specific subdirectory
+# names, we simply walk whatever directory tree is there and pick up every
+# .xml / .tab / .dat / .lbl file we find, paired by basename.
+#
+# Filenames embed the YYMMDD-YYMMDD date range of the contained data
+# (Dawn's standard naming convention), so we can extract real per-record
+# dates for filtering.
 
-    records = []
+_DAWN_DATE_RE = re.compile(r"(\d{6})-(\d{6})")
+_DAWN_FALLBACK_START = date(2015, 1, 1)
+_DAWN_FALLBACK_END   = date(2018, 12, 31)
+_DAWN_MAX_DEPTH      = 4   # safety cap: stop recursing past this depth
 
-    years = ["2015","2016","2017","2018"]
 
-    for y in years:
+def _dawn_extract_dates(stem: str) -> tuple:
+    """
+    Try to pull a YYMMDD-YYMMDD date range out of a Dawn filename stem.
+    Returns (date_start, date_end), or the mission-window fallback if no
+    date pattern is found.
+    """
+    m = _DAWN_DATE_RE.search(stem)
+    if not m:
+        return _DAWN_FALLBACK_START, _DAWN_FALLBACK_END
+    try:
+        d0 = datetime.strptime(m.group(1), "%y%m%d").date()
+        d1 = datetime.strptime(m.group(2), "%y%m%d").date()
+        return d0, d1
+    except ValueError:
+        return _DAWN_FALLBACK_START, _DAWN_FALLBACK_END
 
-        year_url = urljoin(base_url, y + "/")
 
-        try:
-            hrefs = _list_directory(year_url)
-        except:
+# Patterns of filenames to exclude — these are PDS archive packaging
+# artifacts that show up in directory listings but aren't science data.
+# The URLs the walker constructs for them often 404 because they live at
+# the registry root rather than inside any specific bundle.
+_DAWN_EXCLUDE_PATTERNS = (
+    "_sip_v",                # Submission Information Package manifests
+    "_checksum_manifest",    # MD5 manifests
+    "_transfer_manifest",    # PDS transfer manifests
+    "_aip_v",                # Archive Information Package manifests
+    "bundle_",               # bundle-level XML labels
+    "collection_",           # collection-level table-of-contents files
+)
+
+
+def _dawn_skip_filename(basename: str) -> bool:
+    """Return True if this filename is a bundle-manifest artifact, not science data."""
+    low = basename.lower()
+    return any(p in low for p in _DAWN_EXCLUDE_PATTERNS)
+
+
+def _dawn_walk(base_url: str, rel_prefix: str = "", depth: int = 0,
+               root_url: str = None):
+    """
+    Recursively walk a PDS Apache directory tree under `root_url`, yielding
+    (relative_path, is_directory) pairs for every link found.
+
+    Stays inside `root_url` — links that resolve outside of it (e.g. into
+    a sibling Vesta bundle, or back up into the parent registry index)
+    are skipped.  Stops at _DAWN_MAX_DEPTH.
+    """
+    if depth > _DAWN_MAX_DEPTH:
+        return
+
+    if root_url is None:
+        root_url = base_url
+
+    try:
+        hrefs = _list_directory(base_url)
+    except Exception as e:
+        print(f"  could not list {base_url}: {e}")
+        return
+
+    for h in hrefs:
+        # Skip parent links and query-string sort links
+        if h in ("../", "./", "/") or h.startswith("?") or h.startswith("#"):
             continue
 
-        for h in hrefs:
+        # Resolve the href to an absolute URL.  Handles all of:
+        #   relative file: "foo.tab"        → base_url + foo.tab
+        #   relative dir:  "subdir/"        → base_url + subdir/
+        #   parent-relative: "../other/"    → resolves up one level
+        #   absolute: "https://other/..."   → unchanged
+        resolved = urljoin(base_url, h)
 
-            if not h.lower().endswith((".dat",".tab")):
-                continue
+        # Stay inside the original bundle.  Anything that resolves above or
+        # sideways out of root_url is a parent-index link leading to other
+        # bundles' content — those URLs won't work for us anyway.
+        if not resolved.startswith(root_url):
+            continue
 
-            records.append(
-                Record(
-                    date_start=date(int(y),1,1),
-                    date_end=date(int(y),12,31),
-                    files=[f"{y}/{h}"]
-                )
-            )
+        # Apache lists directories with a trailing slash; files without.
+        if h.endswith("/"):
+            sub_rel = f"{rel_prefix}{h}"
+            yield (sub_rel, True)
+            yield from _dawn_walk(resolved, sub_rel, depth + 1, root_url)
+        else:
+            yield (f"{rel_prefix}{h}", False)
+
+
+def _dawn_records(base_url: str) -> List[Record]:
+    """
+    Walk the Dawn-Ceres GRaND archive recursively and build one Record per
+    science-data file.  Pairs each .xml label with its matching .tab/.dat
+    by basename so they're downloaded together.
+
+    Layout-agnostic: works whether the archive uses year subdirs, phase
+    subdirs (HAMO/LAMO/XMO*), collection subdirs, or a flat layout.
+    """
+    print(f"  walking {base_url}")
+
+    files_by_stem = {}   # stem (lowercased) -> {"xml": path, "tab": path, "dat": path}
+    n_dirs        = 0
+    n_files       = 0
+    n_excluded    = 0
+
+    for rel, is_dir in _dawn_walk(base_url):
+        if is_dir:
+            n_dirs += 1
+            continue
+        n_files += 1
+
+        ext = rel.rsplit(".", 1)[-1].lower() if "." in rel else ""
+        if ext not in ("xml", "tab", "dat", "lbl"):
+            continue
+
+        # Use the basename (no path) and lower it for case-insensitive pairing.
+        # Keep the original-cased relative path for the actual download URL.
+        basename = rel.rsplit("/", 1)[-1]
+
+        # Skip bundle-level manifests / SIP packaging files — they pass the
+        # extension check but aren't science data, and the URLs we'd build
+        # for them don't actually resolve.
+        if _dawn_skip_filename(basename):
+            n_excluded += 1
+            continue
+
+        stem = basename.rsplit(".", 1)[0].lower()
+
+        slot = files_by_stem.setdefault(stem, {})
+        # If we somehow see two files with the same stem+ext, keep the first
+        if ext not in slot:
+            slot[ext] = rel
+
+    print(f"  found {n_dirs} directories, {n_files} files under data_calibrated/")
+    if n_excluded:
+        print(f"  excluded {n_excluded} bundle-manifest / SIP file(s)")
+    print(f"  matched {len(files_by_stem)} unique stems with .xml/.tab/.dat/.lbl")
+
+    records = []
+    n_data_pairs = 0
+    n_orphan_xml = 0
+
+    for stem, slot in files_by_stem.items():
+        # Prefer xml as the label, but fall back to lbl (some PDS3 leftovers)
+        label = slot.get("xml") or slot.get("lbl")
+        data  = slot.get("tab") or slot.get("dat")
+
+        # We require at least one data file (tab/dat). Standalone labels
+        # without data are usually documentation pointers — skip them.
+        if data is None:
+            if label is not None:
+                n_orphan_xml += 1
+            continue
+
+        files = []
+        if label is not None:
+            files.append(label)
+        files.append(data)
+
+        d0, d1 = _dawn_extract_dates(stem)
+        records.append(Record(date_start=d0, date_end=d1, files=files))
+        n_data_pairs += 1
+
+    if n_orphan_xml:
+        print(f"  skipped {n_orphan_xml} label(s) with no matching data file")
+    print(f"  built {n_data_pairs} downloadable records")
 
     return records
 
